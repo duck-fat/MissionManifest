@@ -2,10 +2,10 @@ Manifests are cached on each call to `?manifest`. Caches are cleared the day aft
 
 # Commands:
 * `?manifest scan "MISSION_NAME" TRACKING_CHANNEL`
- * Scan the specified channel for any responses that begin with `MISSION_NAME` made by a member with the "Player" role  and reply with the count and a link to each such response.
- * `MISSION_NAME` should be quoted if it contains spaces.
- * *Available to all server members.*
+  * Scan the specified channel for any responses that begin with `MISSION_NAME` made by a member with the "Player" role  and reply with the count and a link to each such response.
+  * `MISSION_NAME` should be quoted if it contains spaces.
+  * *Available to all server members.*
 * `!manifest track "MISSION_NAME" MISSION_DATE`
- * Start a cache for the `MISSION_NAME` manifest; cache will expire the day following `MISSION_DATE`.
- * `MISSION_DATE` should be in format **DD-MM-YYYY**
- * *Available to "Admin" or "DM" roles only.*
+  * Start a cache for the `MISSION_NAME` manifest; cache will expire the day following `MISSION_DATE`.
+  * `MISSION_DATE` should be in format **DD-MM-YYYY**
+  * *Available to "Admin" or "DM" roles only.*
