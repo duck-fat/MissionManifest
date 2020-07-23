@@ -66,10 +66,9 @@ async def scan(ctx: commands.Context, mission_name: str, channel_id: str):
     now = datetime.datetime.utcnow()
     if not last_scan:
         last_scan = now - datetime.timedelta(days=14)
-    num_signups = 0
+    num_signups = 0  # This will end up pulled from the cache eventually
     responses = []
     # query message history
-    embed = Embed(title="Manifest for {}".format(mission_name))
     async for message in channel.history(limit=None, before=now, after=last_scan, oldest_first=True):
         lines = message.content.split('\n')
         try:
@@ -81,15 +80,20 @@ async def scan(ctx: commands.Context, mission_name: str, channel_id: str):
             # found the mission we're looking for
             if player_role in message.author.roles:
                 num_signups += 1
+                # The format assumes line 0 = mission name, line 1 = character name, line i...n = extra info
                 character = lines[1]
                 message_url = r"https://discordapp.com/channels/{}/{}/{}".format(ctx.guild.id, ctx.channel.id, message.id)
                 responses.append((message.author.nick or message.author.name, character, message_url))
+    # Build the response Embed
+    embed = Embed(title="Manifest for \"{}\"".format(mission_name))
     embed.add_field(name="Total Signups", value=str(num_signups), inline=False)
     roster = ""
     for response in responses:
         roster += "* {}: {}\n".format(response[0], "[{}]({})".format(response[1], response[2]))
     embed.add_field(name="Roster", value=roster, inline=False)
+
     await ctx.send(embed=embed)
+    # Record the current scan as the most recent for caching purposes.
     last_scan = now
 
 
