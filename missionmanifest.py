@@ -8,6 +8,7 @@ import datetime
 
 date_fmt = re.compile(r"(\d){4}-(\d){2}-(\d){2}")
 title_fmt = re.compile(r"[*?]")
+channel_id_fmt = re.compile(r"<#(\d+)>")
 ERRORS = [
     "Date parameter in the wrong format. Format is `YYYY-MM-DD`.",
     "Invalid date; date is before today.",
@@ -57,10 +58,11 @@ async def test(ctx, arg):
 @bot.command(description="<FILL ME IN>")
 async def scan(ctx: commands.Context, mission_name: str, channel_id: str):
     global last_scan
-    print("In scan!")
+    channel_id = channel_id_fmt.match(channel_id).group(1)
     channel = await bot.fetch_channel(channel_id)
-    player_role = [r for r in ctx.guild.roles if r.name == 'PC'][0]
+    player_role = [r for r in ctx.guild.roles if r.name == 'PC']
     assert len(player_role) == 1
+    player_role = player_role[0]
     now = datetime.datetime.utcnow()
     if not last_scan:
         last_scan = now - datetime.timedelta(days=14)
@@ -70,15 +72,22 @@ async def scan(ctx: commands.Context, mission_name: str, channel_id: str):
     embed = Embed(title="Manifest for {}".format(mission_name))
     async for message in channel.history(limit=None, before=now, after=last_scan, oldest_first=True):
         lines = message.content.split('\n')
+        try:
+            assert len(lines) > 1
+        except AssertionError:
+            # Skip any single-line messages; sign-up messages must have the mission name as the first line.
+            continue
         if mission_name.lower() in lines[0].lower():
             # found the mission we're looking for
             if player_role in message.author.roles:
                 num_signups += 1
-                responses.append((message.author, message.id))
+                character = lines[1]
+                message_url = r"https://discordapp.com/channels/{}/{}/{}".format(ctx.guild.id, ctx.channel.id, message.id)
+                responses.append((message.author.nick or message.author.name, character, message_url))
     embed.add_field(name="Total Signups", value=str(num_signups), inline=False)
     roster = ""
     for response in responses:
-        roster += "* {}: {}".format(response[0], response[1])
+        roster += "* {}: {}\n".format(response[0], "[{}]({})".format(response[1], response[2]))
     embed.add_field(name="Roster", value=roster, inline=False)
     await ctx.send(embed=embed)
     last_scan = now
