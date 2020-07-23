@@ -15,7 +15,7 @@ ERRORS = [
 ]
 last_scan = None
 
-bot = commands.Bot(command_prefix="?manifest")#, "!manifest"])
+bot = commands.Bot(command_prefix="!manifest ")
 # datastore_file = os.environ.get("MISSIONMANIFEST_DB") or "missionmanifest.db"
 # data_store_conn = None
 
@@ -48,13 +48,14 @@ async def on_disconnect():
     print("MissionManifest has exited.")
 
 
-@bot.command
+@bot.command()
 async def test(ctx, arg):
+    print("In test")
     await ctx.send("ECHO: {}".format(arg))
 
 
 @bot.command(description="<FILL ME IN>")
-async def scan(ctx: commands.Context, mission_name: str, channel_id: int):
+async def scan(ctx: commands.Context, mission_name: str, channel_id: str):
     global last_scan
     print("In scan!")
     channel = await bot.fetch_channel(channel_id)
