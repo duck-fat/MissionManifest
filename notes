@@ -1,0 +1,18 @@
+get_available_emojis:
+    set1 = select * from Emoji where server == guild.id;
+
+    set2 = # get server emoji from Discord API
+
+    set1 - set2 = available emojis
+
+
+track_mission(
+    emoji = get_available_emojis()[0]
+    insert into Mission (serverId, emoji, gameDate, gm, title) values (x, y, z, w)
+    # Trigger on insert into Mission, create entry in Emoji
+    
+    
+cleanup_missions:
+    delete * from Emoji, Mission where Emoji.server == Mission.serverId and Mission.gameData < today;
+    
+
