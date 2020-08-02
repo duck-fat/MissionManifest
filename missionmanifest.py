@@ -10,15 +10,15 @@ from threading import Lock
 from typing import List
 
 
-date_fmt = re.compile(r"(\d){4}-(\d){2}-(\d){2}")
-title_fmt = re.compile(r"[*?]")
+datetime_fmt = re.compile(r"(\d{4})-((?:0\d)|(?:1(?:0|1|2)))-((?:0\d)|(?:1\d)|(?:2\d)|(?:3(?:0|1))) ((?:0\d)|(?:1\d)|(?:2(?:0|1|2|3))):([0-5]\d)")
 channel_id_fmt = re.compile(r"<#(\d+)>")
+level_fmt = re.compile(r"(3\-4)|(5\-8)|(9\-12)|(13\-15)|(17\-20)")
+
+
 ERRORS = [
-    "Date parameter in the wrong format. Format is `YYYY-MM-DD`.",
+    "Date parameter in the wrong format. Format is `YYYY-MM-DD HH:MM`. Time must be in UTC.",
     "Invalid date; date is before today.",
-    "Date exceeds cache limit. Cache limit is 30 days from now."
 ]
-last_scan = None
 
 bot = commands.Bot(command_prefix="!manifest ")
 datastore_file = os.environ.get("MISSIONMANIFEST_DB") or "missionmanifest.db"
@@ -28,21 +28,28 @@ initialize = False
 
 
 def validDate(date_str: str):
-    date_match = date_fmt.fullmatch(date_str)
+    date_match = datetime_fmt.fullmatch(date_str)
     if not date_match:
         return 0
-    now = datetime.date.today()
-    if int(date_match.group(1)) < now.year:
-        if int(date_match.group(2)) < now.month:
-            if int(date_match.group(3)) < now.day:
-                return 1
-            else:
-                if int(date_match.group(2)) - now.month > 1:
-                    return 2
-        else:
-            if int(date_match.group(1)) - now.year > 0:
-                return 2
+    now = datetime.datetime.now(datetime.timezone.utc)
+    parsed = datetime.datetime(int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3)),
+                               hour=int(date_match.group(4)), minute=int(date_match.group(5)),
+                               tzinfo=datetime.timezone.utc)
+    if now > parsed:
+        return 1
     return None
+
+
+def valid_levels(levels: str) -> bool:
+    if level_fmt.match(levels):
+        return True
+    return False
+
+@bot.command()
+async def emojis(ctx):
+    all_emojis = bot.get_guild(ctx.guild.id).emojis
+    emoji_list = ["<:{}:{}>".format(e.name, e.id) for e in all_emojis]
+    await ctx.send("Server's emojis: {}".format(" ".join(emoji_list)))
 
 
 def get_available_emojis(server: int) -> List[str]:
@@ -51,9 +58,24 @@ def get_available_emojis(server: int) -> List[str]:
     used = []
     for emoji in curs.execute("SELECT emoji FROM Emoji WHERE server=?;", (server,)):
         used.append(emoji)
+    curs.close()
+    used = set(used)
     # Get all emojis
+    all_emojis = set(bot.get_guild(server).emojis)
+    return list(all_emojis - used)
 
 
+def create_mission_embed(channel_id, dm_name, description, emoji, levels, mission_name, when):
+    embed = Embed(title="Manifest for \"{}\"".format(mission_name))
+    embed.add_field(name="Tier", value=levels, inline=False)
+    embed.add_field(name="DM", value=dm_name, inline=False)
+    embed.add_field(name="Date", value=when, inline=False)
+    embed.add_field(name="Description", value=description, inline=False)
+    embed.add_field(name="RSVP In", value="<#{}>".format(channel_id), inline=False)
+    embed.add_field(name="Signup Emoji", value=emoji, inline=False)
+    embed.set_thumbnail(url=bot.user.avatar_url)
+    embed.set_footer(text="Last Scanned: {}".format(str(datetime.datetime.utcnow())))
+    return embed
 
 
 @bot.event
@@ -71,7 +93,9 @@ async def on_ready():
             assert isinstance(data_store_conn, sqlite3.Connection)
             curs = data_store_conn.cursor()
             curs.execute("CREATE TABLE Emoji (emojiId INTEGER PRIMARY KEY, server INTEGER, emoji STRING);")
-            curs.execute("CREATE TABLE Mission (missionId INTEGER PRIMARY KEY, serverId ITNEGER, gameDate INTEGER, dm INTEGER);")
+            curs.execute("CREATE TABLE Mission "
+                         "(missionId INTEGER PRIMARY KEY, serverId INTEGER, emojiId INTEGER,"
+                         "datetime INTEGER, dm INTEGER, scanChannel INTEGER, missionName STRING, trackingMsg INTEGER);")
             data_store_conn.commit()
             initialize = False
         data_store_lock.release()
@@ -89,12 +113,6 @@ async def on_disconnect():
         data_store_conn = None
         data_store_lock.release()
     print("MissionManifest has exited.")
-
-
-@bot.command()
-async def test(ctx, arg):
-    print("In test")
-    await ctx.send("ECHO: {}".format(arg))
 
 
 @bot.command(description="<FILL ME IN>")
@@ -137,10 +155,15 @@ async def scan(ctx: commands.Context, mission_name: str, channel_id: str):
 
 
 @bot.command(description="<WHAT IS MY PURPOSE>")
-async def track(ctx: commands.Context, mission_name: str, when: str, track_channel: str,
+async def track(ctx: commands.Context, mission_name: str, when: str, levels: str, track_channel: str,
                 *description):
-    player_role = [r for r in ctx.guild.roles if r.name == 'PC']
-    assert len(player_role) == 1
+    if not valid_levels(levels):
+        await ctx.send("Invalid level range.")
+        return
+    player_role = [r for r in ctx.guild.roles if r.name == 'DM']
+    if len(player_role) != 1:
+        await ctx.send("Server does not provide a DM role.")
+        return
     player_role = player_role[0]
     if player_role not in ctx.author.roles:
         await ctx.send("Only users with the DM role can create missions.")
@@ -151,25 +174,27 @@ async def track(ctx: commands.Context, mission_name: str, when: str, track_chann
         await ctx.send(ERRORS[date_bad])
         return
 
-    emoji = random.choice(get_available_emojis(ctx.guild))
+    emoji = random.choice(get_available_emojis(ctx.guild.id))
     description = " ".join(description)
 
-    embed = Embed(title="Manifest for \"{}\"".format(mission_name))
-    embed.add_field(name="DM", value=ctx.author.nick or ctx.author.name, inline=False)
-    embed.add_field(name="Date", value=when, inline=False)
-    embed.add_field(name="", value=description, inline=False)
-    embed.add_field(name="RSVP In", value=channel_id, inline=False)
-    embed.add_field(name="Signup Emoji", value=emoji, inline=False)
+    embed = create_mission_embed(channel_id, ctx.author.nick or ctx.author.name,
+                                 description, emoji, levels, mission_name, when)
     signup_msg = await ctx.send(embed=embed)
 
     assert isinstance(data_store_conn, sqlite3.Connection)
-    assert isinstance(data_store_lock, Lock)
     # Create entry in db for new mission.
     data_store_lock.acquire()
-    data_store_conn.execute("INSERT INTO Mission (serverId, scanChannel, missionName, emoji, datetime, tracking_msg)"
-                            " VALUES (?, ?, ?, ?, ?);",
-                            (ctx.guild, channel_id, mission_name, emoji, when, signup_msg.id))
+    data_store_conn.execute("INSERT INTO Emoji (server, emoji) VALUES (?, ?);", (ctx.guild.id, emoji.name))
+    curs = data_store_conn.cursor()
+    curs.execute("SELECT emojiId from Emoji WHERE emojiId=(SELECT MAX(emojiId) FROM Emoji);")
+    emoji_id = curs.fetchone()[0]
+    curs.close()
+    data_store_conn.execute("INSERT INTO Mission (serverId, emojiId, datetime, dm, scanChannel, missionName, trackingMsg)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?);",
+                            (ctx.guild.id, emoji_id, when, ctx.author.id, channel_id, mission_name, signup_msg.id))
+    data_store_conn.commit()
     data_store_lock.release()
+
 
 token = os.environ.get("MISSIONMANIFEST_SECRET")
 bot.run(token)
