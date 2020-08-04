@@ -6,6 +6,7 @@ import os
 import re
 import datetime
 import sqlite3
+from time import sleep
 from threading import Lock
 from typing import List
 
@@ -30,20 +31,21 @@ initialize = False
 def validDate(date_str: str):
     date_match = datetime_fmt.fullmatch(date_str)
     if not date_match:
-        return 0
+        return None, 0
     now = datetime.datetime.now(datetime.timezone.utc)
     parsed = datetime.datetime(int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3)),
                                hour=int(date_match.group(4)), minute=int(date_match.group(5)),
                                tzinfo=datetime.timezone.utc)
     if now > parsed:
-        return 1
-    return None
+        return None, 1
+    return parsed.timestamp(), None
 
 
 def valid_levels(levels: str) -> bool:
     if level_fmt.match(levels):
         return True
     return False
+
 
 @bot.command()
 async def emojis(ctx):
@@ -54,11 +56,10 @@ async def emojis(ctx):
 
 def get_available_emojis(server: int) -> List[str]:
     assert isinstance(data_store_conn, sqlite3.Connection)
-    curs = data_store_conn.cursor()
     used = []
-    for emoji in curs.execute("SELECT emoji FROM Emoji WHERE server=?;", (server,)):
-        used.append(emoji)
-    curs.close()
+    with data_store_conn.cursor() as curs:
+        for row in curs.execute("SELECT emoji FROM Emoji WHERE server=?;", (server,)):
+            used.append(row[0])
     used = set(used)
     # Get all emojis
     all_emojis = set(bot.get_guild(server).emojis)
@@ -78,6 +79,32 @@ def create_mission_embed(channel_id, dm_name, description, emoji, levels, missio
     return embed
 
 
+def poll_thread():
+    assert isinstance(data_store_conn, sqlite3.Connection)
+    to_remove = []
+    with data_store_conn.cursor() as curs:
+        for row in curs.execute("SELECT missionId, missionCreateTime, serverId, emojiId, "
+                                "datetime, scanChannel, trackingChannel, trackingMsg FROM Mission;"):
+            if int(row[4]) <= datetime.datetime.now(datetime.timezone.utc).timestamp():
+                # Mission already started or is in the past
+                to_remove.append((int(row[0]), int(row[3])))
+                continue
+            # Mission still active
+            server = bot.get_guild(int(row[2]))
+            assert isinstance(server, discord.Guild)
+            track_channel = server.get_channel(int(row[6]))
+            scan_channel = server.get_channel(int(row[5]))
+            assert isinstance(track_channel, discord.TextChannel)
+            track_msg = track_channel.fetch_message(int(row[7]))
+            mission_create_time = int(row[2])
+            # Iterate through scan_channel's history between mission_create_time and present to look for emojiId
+            ''' BIG BRAIN: collect relevant info from Db first, then iterate through server.scan_channels and
+            find all replies at once instead of re-scanning.'''
+            pass
+        # delete anything in the to_remove list
+    pass
+
+
 @bot.event
 async def on_ready():
     global data_store_lock
@@ -94,8 +121,9 @@ async def on_ready():
             curs = data_store_conn.cursor()
             curs.execute("CREATE TABLE Emoji (emojiId INTEGER PRIMARY KEY, server INTEGER, emoji STRING);")
             curs.execute("CREATE TABLE Mission "
-                         "(missionId INTEGER PRIMARY KEY, serverId INTEGER, emojiId INTEGER,"
-                         "datetime INTEGER, dm INTEGER, scanChannel INTEGER, missionName STRING, trackingMsg INTEGER);")
+                         "(missionId INTEGER PRIMARY KEY, missionCreateTime INTEGER, serverId INTEGER, emojiId INTEGER,"
+                         "datetime INTEGER, dm INTEGER, scanChannel INTEGER, missionName STRING, "
+                         "trackingChannel INTEGER, trackingMsg INTEGER);")
             data_store_conn.commit()
             initialize = False
         data_store_lock.release()
@@ -169,9 +197,9 @@ async def track(ctx: commands.Context, mission_name: str, when: str, levels: str
         await ctx.send("Only users with the DM role can create missions.")
         return
     channel_id = channel_id_fmt.match(track_channel).group(1)
-    date_bad = validDate(when)
-    if date_bad:
-        await ctx.send(ERRORS[date_bad])
+    when_posix, err = validDate(when)
+    if not when_posix:
+        await ctx.send(ERRORS[err])
         return
 
     emoji = random.choice(get_available_emojis(ctx.guild.id))
@@ -189,9 +217,10 @@ async def track(ctx: commands.Context, mission_name: str, when: str, levels: str
     curs.execute("SELECT emojiId from Emoji WHERE emojiId=(SELECT MAX(emojiId) FROM Emoji);")
     emoji_id = curs.fetchone()[0]
     curs.close()
-    data_store_conn.execute("INSERT INTO Mission (serverId, emojiId, datetime, dm, scanChannel, missionName, trackingMsg)"
-                            " VALUES (?, ?, ?, ?, ?, ?, ?);",
-                            (ctx.guild.id, emoji_id, when, ctx.author.id, channel_id, mission_name, signup_msg.id))
+    data_store_conn.execute("INSERT INTO Mission (serverId, missionCreateTime, emojiId, datetime, dm, scanChannel, "
+                            "missionName, trackingChannel, trackingMsg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+                            (ctx.guild.id, datetime.datetime.now(tz=datetime.timezone.utc).timestamp(), emoji_id,
+                             when_posix, ctx.author.id, channel_id, mission_name, signup_msg.channel.id, signup_msg.id))
     data_store_conn.commit()
     data_store_lock.release()
 
