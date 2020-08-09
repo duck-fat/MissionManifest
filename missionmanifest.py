@@ -9,6 +9,7 @@ import sqlite3
 from time import sleep
 from threading import Lock
 from typing import List
+import pickle
 
 
 datetime_fmt = re.compile(r"(\d{4})-((?:0\d)|(?:1(?:0|1|2)))-((?:0\d)|(?:1\d)|(?:2\d)|(?:3(?:0|1))) ((?:0\d)|(?:1\d)|(?:2(?:0|1|2|3))):([0-5]\d)")
@@ -59,7 +60,7 @@ def get_available_emojis(server: int) -> List[str]:
     used = []
     with data_store_conn.cursor() as curs:
         for row in curs.execute("SELECT emoji FROM Emoji WHERE server=?;", (server,)):
-            used.append(row[0])
+            used.append(pickle.loads(row[0]))
     used = set(used)
     # Get all emojis
     all_emojis = set(bot.get_guild(server).emojis)
@@ -82,26 +83,43 @@ def create_mission_embed(channel_id, dm_name, description, emoji, levels, missio
 def poll_thread():
     assert isinstance(data_store_conn, sqlite3.Connection)
     to_remove = []
+    to_scan = {}
+    oldest_per_channel = {}  # ?? maybe? for tracking oldest post on a per channel basis
     with data_store_conn.cursor() as curs:
-        for row in curs.execute("SELECT missionId, missionCreateTime, serverId, emojiId, "
-                                "datetime, scanChannel, trackingChannel, trackingMsg FROM Mission;"):
-            if int(row[4]) <= datetime.datetime.now(datetime.timezone.utc).timestamp():
-                # Mission already started or is in the past
-                to_remove.append((int(row[0]), int(row[3])))
+        for row in curs.execute("SELECT Mission.*, Emoji.emoji FROM Mission, Emoji "
+                                "WHERE Mission.emojiId=Emoji.emojiId;"):
+            when = int(row[4])
+            if when <= datetime.datetime.now(datetime.timezone.utc).timestamp():
+                # Mission already started or is in the past, clean it up.
+                to_remove.append((int(row[0]), int(row[6])))
                 continue
             # Mission still active
-            server = bot.get_guild(int(row[2]))
-            assert isinstance(server, discord.Guild)
-            track_channel = server.get_channel(int(row[6]))
-            scan_channel = server.get_channel(int(row[5]))
-            assert isinstance(track_channel, discord.TextChannel)
-            track_msg = track_channel.fetch_message(int(row[7]))
-            mission_create_time = int(row[2])
-            # Iterate through scan_channel's history between mission_create_time and present to look for emojiId
-            ''' BIG BRAIN: collect relevant info from Db first, then iterate through server.scan_channels and
-            find all replies at once instead of re-scanning.'''
-            pass
-        # delete anything in the to_remove list
+            scan_location = (int(row[1]), int(row[2]))  # Item 1: server_id, Item 2: scan_channel_id
+            scan_target = (row[5], row[7])  # Item 1: discord.Message blob, Item 2: emoji blob
+
+            if scan_location in to_scan:
+                to_scan[scan_location].append(scan_target)
+            else:
+                to_scan[scan_location] = [scan_target]
+            mission_time = int(row[3])
+            if scan_location in oldest_per_channel:
+                if oldest_per_channel[scan_location] < mission_time:
+                    continue
+            oldest_per_channel[scan_location] = mission_time
+    ''' BIG BRAIN: collect relevant info from Db first, then iterate through server.scan_channels and
+    find all replies at once instead of re-scanning.'''
+    # Iterate through scan_channel's history between mission_create_time and present to look for emoji
+    for scan_location, scan_target in to_scan.items():
+        server = bot.get_guild(scan_location[0])
+        assert isinstance(server, discord.Guild)
+        scan_channel = server.get_channel(scan_location[1])
+        scan_limit = datetime.datetime.utcfromtimestamp(oldest_per_channel[scan_location])
+        for message in await scan_channel.history(after=scan_limit):
+            if scan_target[1] in message.reactions:  # Need to get actual emoji entity (id:name)
+                pass
+        tracking_msg = pickle.loads(scan_target[0])
+        tracking_embed = tracking_msg.embeds[0]
+    # delete anything in the to_remove list
     pass
 
 
@@ -119,11 +137,11 @@ async def on_ready():
         if initialize:
             assert isinstance(data_store_conn, sqlite3.Connection)
             curs = data_store_conn.cursor()
-            curs.execute("CREATE TABLE Emoji (emojiId INTEGER PRIMARY KEY, server INTEGER, emoji STRING);")
+            curs.execute("CREATE TABLE Emoji (emojiId INTEGER PRIMARY KEY, server INTEGER, emoji BLOB);")
             curs.execute("CREATE TABLE Mission "
-                         "(missionId INTEGER PRIMARY KEY, missionCreateTime INTEGER, serverId INTEGER, emojiId INTEGER,"
-                         "datetime INTEGER, dm INTEGER, scanChannel INTEGER, missionName STRING, "
-                         "trackingChannel INTEGER, trackingMsg INTEGER);")
+                         "(missionId INTEGER PRIMARY KEY, serverId INTEGER, scanChannelId INTEGER, "
+                         "missionCreateTime INTEGER, missionTime INTEGER,"
+                         "tracking_msg BLOB, emojiId INTEGER);")
             data_store_conn.commit()
             initialize = False
         data_store_lock.release()
@@ -207,20 +225,25 @@ async def track(ctx: commands.Context, mission_name: str, when: str, levels: str
 
     embed = create_mission_embed(channel_id, ctx.author.nick or ctx.author.name,
                                  description, emoji, levels, mission_name, when)
-    signup_msg = await ctx.send(embed=embed)
+    tracking_msg = await ctx.send(embed=embed)
 
     assert isinstance(data_store_conn, sqlite3.Connection)
     # Create entry in db for new mission.
     data_store_lock.acquire()
-    data_store_conn.execute("INSERT INTO Emoji (server, emoji) VALUES (?, ?);", (ctx.guild.id, emoji.name))
+    emoji_blob = pickle.dumps(emoji)
+    data_store_conn.execute("INSERT INTO Emoji (server, emoji) VALUES (?, ?);", (ctx.guild.id, emoji_blob))
     curs = data_store_conn.cursor()
     curs.execute("SELECT emojiId from Emoji WHERE emojiId=(SELECT MAX(emojiId) FROM Emoji);")
     emoji_id = curs.fetchone()[0]
     curs.close()
-    data_store_conn.execute("INSERT INTO Mission (serverId, missionCreateTime, emojiId, datetime, dm, scanChannel, "
-                            "missionName, trackingChannel, trackingMsg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
-                            (ctx.guild.id, datetime.datetime.now(tz=datetime.timezone.utc).timestamp(), emoji_id,
-                             when_posix, ctx.author.id, channel_id, mission_name, signup_msg.channel.id, signup_msg.id))
+    tracking_msg_blob = pickle.dumps(tracking_msg)
+    data_store_conn.execute("INSERT INTO Mission (serverId, scanChannelId, "
+                            "missionCreateTime, missionTime, "
+                            "tracking_msg, emojiId) "
+                            "VALUES (?, ?, ?, ?, ?, ?);",
+                            (ctx.guild.id, channel_id,
+                             datetime.datetime.now(tz=datetime.timezone.utc).timestamp(), when_posix,
+                             tracking_msg_blob, emoji_id))
     data_store_conn.commit()
     data_store_lock.release()
 
